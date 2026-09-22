@@ -159,6 +159,7 @@ public:
         active            = std::move(constructed.instance);
         load              = std::move(constructed.load);
         sampling_defaults = active->frontend.sampling_defaults();
+        reasoning_efforts = active->frontend.reasoning_effort_capabilities();
         StartupPhaseScope finalize_phase(options.startup_observer, StartupPhase::EngineFinalize);
         if (options.purpose == EnginePurpose::CausalScoring) {
             core = std::make_unique<ScoringCore>(*active, device);
@@ -182,6 +183,7 @@ public:
     std::unique_ptr<runtime::ModelInstance> active;
     LoadSummary load;
     ModelSamplingDefaults sampling_defaults;
+    ReasoningEffortCapabilities reasoning_efforts;
     Core core;
 };
 
@@ -275,6 +277,11 @@ std::uint32_t Engine::count_tokens(PromptInput input, const PreparationControl& 
 ModelSamplingDefaults Engine::sampling_defaults() const {
     if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
     return impl_->sampling_defaults;
+}
+
+ReasoningEffortCapabilities Engine::reasoning_effort_capabilities() const {
+    if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
+    return impl_->reasoning_efforts;
 }
 
 GenerationHandle Engine::submit(PreparedPrompt prompt, RequestOptions options,

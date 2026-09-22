@@ -397,6 +397,15 @@ enum class ReasoningEffort : std::uint8_t {
     return {};
 }
 
+// Reasoning-effort capability of the loaded chat template, determined at startup by probing the
+// template with each protocol value.
+struct ReasoningEffortCapabilities {
+    // Protocol effort names the loaded template accepts, in protocol order.
+    std::vector<ReasoningEffort> supported_efforts;
+    // The template default when thinking is enabled and no effort is requested.
+    std::optional<ReasoningEffort> default_effort;
+};
+
 enum class PromptContinuationMode : std::uint8_t {
     NewAssistantTurn,
     ContinueFinalAssistant,

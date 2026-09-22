@@ -626,12 +626,6 @@ void parse_tools(const Json& body, GenerationRequest& output) {
             if (!function.at("strict").is_boolean()) {
                 bad_request("function strict must be a boolean", "tools");
             }
-            if (function.at("strict").get<bool>()) {
-                bad_request(
-                    "strict=true requires generated function arguments to satisfy the declared "
-                    "JSON Schema, which NInfer cannot guarantee",
-                    "tools", "strict_tools_not_supported");
-            }
         }
         output.tools.push_back(std::move(tool));
     }

@@ -85,6 +85,9 @@ public:
                                              const PreparationControl& control = {}) const;
     [[nodiscard]] ModelSamplingDefaults sampling_defaults() const;
 
+    // Reasoning-effort capability of the loaded chat template, probed at startup.
+    [[nodiscard]] ReasoningEffortCapabilities reasoning_effort_capabilities() const;
+
     // Establishes queue membership synchronously with a fixed output consumer mode. Destroying an
     // unconsumed handle cancels its request; wait() owns result consumption and may run
     // independently from GPU execution. Streaming mode requires a non-null sink in wait() and

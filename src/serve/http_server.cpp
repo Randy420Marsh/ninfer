@@ -478,7 +478,8 @@ void HttpServer::register_routes() {
 }
 
 void HttpServer::handle_models(const httplib::Request&, httplib::Response& res) const {
-    res.set_content(make_models_list(public_model_id_, unix_time_now(), options_.max_context),
+    res.set_content(make_models_list(public_model_id_, unix_time_now(), options_.max_context,
+                                     reasoning_capabilities_),
                     "application/json");
 }
 
@@ -493,7 +494,8 @@ void HttpServer::handle_model(const httplib::Request& req, httplib::Response& re
         write_openai_error(res, error);
         return;
     }
-    res.set_content(make_model_object(public_model_id_, unix_time_now(), options_.max_context),
+    res.set_content(make_model_object(public_model_id_, unix_time_now(), options_.max_context,
+                                      reasoning_capabilities_),
                     "application/json");
 }
 
@@ -505,6 +507,7 @@ void HttpServer::attach(GenerationService& service) {
     }
     const ninfer::LoadSummary load = service.load_summary();
     public_model_id_               = resolve_public_model_id(options_, load.model_name);
+    reasoning_capabilities_        = service.reasoning_effort_capabilities();
     service_                       = &service;
     request_jsonl_.write_server_start(options_, service.engine_options(),
                                       service.sampling_defaults(), public_model_id_, load,

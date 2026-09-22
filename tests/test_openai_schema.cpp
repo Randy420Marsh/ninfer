@@ -288,8 +288,8 @@ int test_tools() {
 
     body          = base_request();
     body["tools"] = Json::array({function_tool("weather", true)});
-    failures += check(api_error([&] { (void)parse(body); }).code == "strict_tools_not_supported",
-                      "strict tools rejected");
+    failures += check(parse(body).generation.uses_tools(),
+                      "strict=true tools are accepted (strict is a model-side hint)");
     body["tools"] = Json::array({Json{{"type", "custom"}, {"name", "shell"}}});
     failures += check(api_error([&] { (void)parse(body); }).code == "tool_type_not_supported",
                       "custom tools rejected");
@@ -761,14 +761,27 @@ int test_stream_observations() {
 }
 
 int test_common_objects() {
-    int failures      = 0;
-    const Json models = Json::parse(make_models_list("qwen", 7, 240000));
+    int failures = 0;
+    const ninfer::ReasoningEffortCapabilities reasoning{
+        .supported_efforts = {ninfer::ReasoningEffort::None, ninfer::ReasoningEffort::Low,
+                              ninfer::ReasoningEffort::Medium, ninfer::ReasoningEffort::XHigh},
+        .default_effort = ninfer::ReasoningEffort::XHigh,
+    };
+    const Json models = Json::parse(make_models_list("qwen", 7, 240000, reasoning));
     failures +=
         check(models["data"][0]["id"] == "qwen" && models["data"][0]["max_model_len"] == 240000,
               "models list advertises the configured context limit");
-    const Json model = Json::parse(make_model_object("qwen", 7, 240000));
+    failures += check(
+        models["data"][0]["reasoning"]["supported_efforts"] ==
+                Json::array({"none", "low", "medium", "xhigh"}) &&
+            models["data"][0]["reasoning"]["default_effort"] == "xhigh",
+        "models list advertises the loaded template reasoning efforts");
+    const Json model = Json::parse(make_model_object("qwen", 7, 240000, reasoning));
     failures += check(model["max_model_len"] == 240000,
                       "model lookup advertises the configured context limit");
+    failures += check(model["reasoning"]["supported_efforts"] ==
+                          Json::array({"none", "low", "medium", "xhigh"}),
+                      "model lookup advertises the loaded template reasoning efforts");
     const Json error = Json::parse(make_error_body(
         ApiError{.status = 400, .message = "bad", .param = "messages", .code = "invalid"}));
     failures += check(error["error"]["param"] == "messages" && error["error"]["code"] == "invalid",

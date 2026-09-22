@@ -177,26 +177,44 @@ void apply_openai_prompt_cache_policy(GenerationRequest& request, OpenAIPromptCa
     request.allow_engine_automatic_shared_prefixes = false;
 }
 
+Json make_reasoning_capabilities_json(const ReasoningEffortCapabilities& reasoning) {
+    // OpenRouter-compatible discovery metadata for the loaded chat template's effort support.
+    Json supported = Json::array();
+    for (const auto effort : reasoning.supported_efforts) {
+        supported.push_back(std::string(reasoning_effort_name(effort)));
+    }
+    Json payload = {{"supported_efforts", std::move(supported)}};
+    payload["default_effort"] =
+        reasoning.default_effort
+            ? Json(std::string(reasoning_effort_name(*reasoning.default_effort)))
+            : Json(nullptr);
+    return payload;
+}
+
 std::string make_models_list(const std::string& model_id, std::int64_t created,
-                             std::uint32_t max_model_len) {
+                             std::uint32_t max_model_len,
+                             const ReasoningEffortCapabilities& reasoning) {
     // vLLM/llama.cpp-compatible discovery metadata for the configured per-request context limit.
-    const Json payload = {{"object", "list"},
-                          {"data", Json::array({Json{{"id", model_id},
-                                                     {"object", "model"},
-                                                     {"created", created},
-                                                     {"owned_by", "ninfer"},
-                                                     {"max_model_len", max_model_len}}})}};
+    const Json model = {{"id", model_id},
+                        {"object", "model"},
+                        {"created", created},
+                        {"owned_by", "ninfer"},
+                        {"max_model_len", max_model_len},
+                        {"reasoning", make_reasoning_capabilities_json(reasoning)}};
+    const Json payload = {{"object", "list"}, {"data", Json::array({model})}};
     return payload.dump();
 }
 
 std::string make_model_object(const std::string& model_id, std::int64_t created,
-                              std::uint32_t max_model_len) {
+                              std::uint32_t max_model_len,
+                              const ReasoningEffortCapabilities& reasoning) {
     // vLLM/llama.cpp-compatible discovery metadata for the configured per-request context limit.
     const Json payload = {{"id", model_id},
                           {"object", "model"},
                           {"created", created},
                           {"owned_by", "ninfer"},
-                          {"max_model_len", max_model_len}};
+                          {"max_model_len", max_model_len},
+                          {"reasoning", make_reasoning_capabilities_json(reasoning)}};
     return payload.dump();
 }
 

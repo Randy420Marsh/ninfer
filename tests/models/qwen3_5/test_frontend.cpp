@@ -584,6 +584,9 @@ int test_rendered_special_tokens() {
     for (const auto& source :
          {thinking_toggle_template_source(), reasoning_effort_template_source()}) {
         const auto compiled = fi::CompiledChatTemplate::resolve(source);
+        // The effort template renders a system preamble carrying the reasoning instruction for
+        // thinking efforts; the thinking-toggle template has no such preamble.
+        const bool effort_preamble = source == reasoning_effort_template_source();
         for (const auto role :
              {ninfer::ChatRole::User, ninfer::ChatRole::Tool, ninfer::ChatRole::Assistant}) {
             const auto rendered = compiled.render(
@@ -597,7 +600,8 @@ int test_rendered_special_tokens() {
                 check(rendered.text.find(quoted) != std::string::npos &&
                           rendered.media_placeholders.empty() && count(248056) == 0 &&
                           count(248057) == 0 && count(248053) == 0 && count(248054) == 0 &&
-                          count(248045) == 3 && count(248046) == 2 &&
+                          count(248045) == (effort_preamble ? 4 : 3) &&
+                          count(248046) == (effort_preamble ? 3 : 2) &&
                           tokenizer.decode(encoded.input_ids) == rendered.text,
                       "quoted controls changed chat layout, token meaning or message bytes");
         }
@@ -2155,6 +2159,38 @@ int test_media_preparation_cancellation() {
     return check(false, "cancelled media preparation completed successfully");
 }
 
+int test_reasoning_effort_capabilities() {
+    const auto full = make_frontend(resources(reasoning_effort_template_source()), false);
+    const auto& full_capabilities = full.reasoning_effort_capabilities();
+    int failures = check(
+        full_capabilities.supported_efforts ==
+                std::vector<ninfer::ReasoningEffort>{
+                    ninfer::ReasoningEffort::None, ninfer::ReasoningEffort::Minimal,
+                    ninfer::ReasoningEffort::Low, ninfer::ReasoningEffort::Medium,
+                    ninfer::ReasoningEffort::High, ninfer::ReasoningEffort::XHigh,
+                    ninfer::ReasoningEffort::Max} &&
+            full_capabilities.default_effort == ninfer::ReasoningEffort::XHigh,
+        "the effort-vocabulary template advertises every value and its default");
+    const auto toggle = make_frontend(resources(thinking_toggle_template_source()), false);
+    failures += check(toggle.reasoning_effort_capabilities().supported_efforts.size() == 7 &&
+                          toggle.reasoning_effort_capabilities().default_effort == std::nullopt,
+                      "a template that ignores the effort parameter accepts every value");
+    const auto restricted = make_frontend(
+        resources("{%- if reasoning_effort is defined and reasoning_effort not in ('low', 'medium') %}"
+                  "{{- raise_exception('Unsupported reasoning effort ' ~ reasoning_effort) }}"
+                  "{%- endif %}\n"
+                  "<|im_start|>user\n{{- messages[0].content }}\n<|im_end|>\n"
+                  "<|im_start|>assistant\n"),
+        false);
+    failures += check(
+        restricted.reasoning_effort_capabilities().supported_efforts ==
+                std::vector<ninfer::ReasoningEffort>{ninfer::ReasoningEffort::Low,
+                                                      ninfer::ReasoningEffort::Medium} &&
+            restricted.reasoning_effort_capabilities().default_effort == std::nullopt,
+        "a template that rejects effort values advertises only the accepted ones");
+    return failures;
+}
+
 } // namespace
 
 int main() {
@@ -2203,5 +2239,6 @@ int main() {
     failures += test_media_preparation_cancellation();
     failures += test_invalid_media_classification();
     failures += test_disabled_vision();
+    failures += test_reasoning_effort_capabilities();
     return failures == 0 ? 0 : 1;
 }

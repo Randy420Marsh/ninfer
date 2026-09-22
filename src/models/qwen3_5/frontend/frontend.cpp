@@ -545,6 +545,49 @@ PreparedContextCache prepare_context_cache(
     return out;
 }
 
+// Probe the loaded template with each protocol effort value and report which ones the template
+// accepts, plus the template's own default. A template that rejects a value fails the probe
+// render with std::invalid_argument (the Jinja raise_exception path); any other failure is a
+// genuine template defect and propagates at startup.
+ReasoningEffortCapabilities probe_reasoning_efforts(const fi::CompiledChatTemplate& chat_template) {
+    ReasoningEffortCapabilities capabilities;
+    fi::ChatMessage probe;
+    probe.parts.push_back(fi::ChatPart::text_part("Hi"));
+    const auto render = [&](std::optional<bool> thinking, std::optional<ReasoningEffort> effort) {
+        fi::ChatRenderOptions options;
+        options.enable_thinking  = thinking;
+        options.reasoning_effort = effort;
+        return chat_template.render({probe}, options);
+    };
+    for (const ReasoningEffort effort :
+         {ReasoningEffort::None, ReasoningEffort::Minimal, ReasoningEffort::Low,
+          ReasoningEffort::Medium, ReasoningEffort::High, ReasoningEffort::XHigh,
+          ReasoningEffort::Max}) {
+        try {
+            (void)render(effort != ReasoningEffort::None, effort);
+            capabilities.supported_efforts.push_back(effort);
+        } catch (const std::invalid_argument&) {
+            // The template rejects this effort value.
+        }
+    }
+    try {
+        const auto rendered = render(true, std::nullopt);
+        for (const ReasoningEffort effort :
+             {ReasoningEffort::Minimal, ReasoningEffort::Low, ReasoningEffort::Medium,
+              ReasoningEffort::High, ReasoningEffort::XHigh, ReasoningEffort::Max}) {
+            if (rendered.text.find("Reasoning effort is set to " +
+                                   std::string(reasoning_effort_name(effort))) !=
+                std::string::npos) {
+                capabilities.default_effort = effort;
+                break;
+            }
+        }
+    } catch (const std::invalid_argument&) {
+        // A template without a thinking default exposes no default effort.
+    }
+    return capabilities;
+}
+
 } // namespace
 
 ModelSamplingDefaults default_sampling(Architecture architecture) {
@@ -593,7 +636,8 @@ public:
             throw std::invalid_argument(
                 "Frontend requires the parsed model tokenizer and public token domain");
         }
-        sampling = default_sampling(options.architecture);
+        sampling          = default_sampling(options.architecture);
+        reasoning_efforts = probe_reasoning_efforts(chat_template);
         for (const int token : tokenizer->default_stop_token_ids()) {
             if (!tokenizer->is_valid_token(token)) {
                 throw std::invalid_argument(
@@ -630,6 +674,7 @@ public:
     std::shared_ptr<fi::MediaPreprocessCache> media_cache;
     StopPolicy defaults;
     ModelSamplingDefaults sampling;
+    ReasoningEffortCapabilities reasoning_efforts;
     std::shared_ptr<const std::vector<TokenId>> thinking_control_tokens;
     bool vision_enabled       = true;
     std::uint32_t max_context = 0;
@@ -692,6 +737,10 @@ Frontend::~Frontend()                              = default;
 
 const ModelSamplingDefaults& Frontend::sampling_defaults() const noexcept {
     return impl_->sampling;
+}
+
+const ReasoningEffortCapabilities& Frontend::reasoning_effort_capabilities() const noexcept {
+    return impl_->reasoning_efforts;
 }
 
 Frontend make_frontend(const FrontendResources& resources, FrontendOptions options) {

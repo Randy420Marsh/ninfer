@@ -719,8 +719,8 @@ int test_explicit_rejections() {
     value["tools"] = Json::array({Json{{"type", "function"}, {"name", "f"}, {"strict", true}}});
     failures += check(api_code([&] {
                           (void)parse_openai_responses_create_request(value, limits());
-                      }) == "strict_tools_not_supported",
-                      "strict function schema is rejected explicitly");
+                      }).empty(),
+                      "strict=true function schema is accepted (model-side hint)");
 
     value         = base;
     value["text"] = Json{{"format", Json{{"type", "json_schema"}}}};

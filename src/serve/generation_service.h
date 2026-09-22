@@ -118,6 +118,10 @@ public:
         return engine_->sampling_defaults();
     }
 
+    [[nodiscard]] ninfer::ReasoningEffortCapabilities reasoning_effort_capabilities() const {
+        return engine_->reasoning_effort_capabilities();
+    }
+
     [[nodiscard]] PreparedRequest prepare(const GenerationRequest& req,
                                           GenerationConsumerMode consumer_mode,
                                           ninfer::GenerationObservationOptions observation = {},

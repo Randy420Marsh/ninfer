@@ -55,8 +55,8 @@ selected for this process.
 | Method and path | Behavior |
 |---|---|
 | `GET /health` | Engine readiness |
-| `GET /v1/models` | configured OpenAI model alias and effective `max_model_len` |
-| `GET /v1/models/{id}` | lookup of the configured alias and effective `max_model_len` |
+| `GET /v1/models` | configured OpenAI model alias, effective `max_model_len`, and the reasoning efforts the loaded template supports |
+| `GET /v1/models/{id}` | lookup of the configured alias, effective `max_model_len`, and the reasoning efforts the loaded template supports |
 | `POST /v1/chat/completions` | OpenAI-style chat generation |
 | `POST /v1/responses` | OpenAI Responses Core generation, state, typed Items, and SSE |
 | `POST /v1/responses/input_tokens` | Responses prompt-token count without generation |
@@ -65,6 +65,13 @@ selected for this process.
 | `GET /v1/responses/{id}/input_items` | list that Response's normalized input Items |
 | `POST /v1/messages` | Anthropic-style message generation |
 | `POST /v1/messages/count_tokens` | checkpoint-native expanded input-token count |
+
+The model object reported by `GET /v1/models` and `GET /v1/models/{id}` carries a `reasoning`
+capability block: `supported_efforts` lists the `reasoning_effort` values the loaded chat
+template accepts, in protocol order, and `default_effort` is the template's own default when
+thinking is enabled and no effort is requested (`null` when the template exposes no detectable
+default). Both values are probed from the loaded template at startup, so they reflect the
+effective template, including a `--chat-template` override.
 
 `GET /health` returns HTTP 200 with `{"status":"ok"}` while the Engine can accept work. After an
 Engine-wide failure it returns HTTP 503 with `{"status":"unavailable"}`. Temporary queue
@@ -124,7 +131,7 @@ The endpoint supports:
 
 Options whose observable behavior the Engine cannot provide are rejected when they request that
 behavior. This includes JSON constrained output, nonzero `logit_bias`, requested log probabilities,
-audio/file input or audio output, `strict:true`, required or named tool choice,
+audio/file input or audio output, required or named tool choice,
 `parallel_tool_calls:false` with enabled tools, explicit low/high image detail, web search,
 moderation, low/high verbosity, stored Chat Completions, and non-empty legacy `functions`.
 Each capability rejection identifies the affected field and the guarantee NInfer cannot provide.
@@ -216,6 +223,9 @@ not promise that the model will emit nonempty content or a tool call after the m
 For Chat Completions, `reasoning_effort: "none"` requests disabled thinking. The selected template
 interprets the other standard values (`minimal`, `low`, `medium`, `high`, `xhigh`, `max`).
 Conflicting explicit `enable_thinking` and effort values return `conflicting_template_option`.
+A template that does not accept a value rejects the request with HTTP 400; the `reasoning`
+block on `GET /v1/models` and `GET /v1/models/{id}` lists the efforts the loaded template
+actually supports.
 
 `preserve_thinking` controls reasoning retention according to the selected template. Request
 options override server defaults set with `--no-thinking` and `--preserve-thinking`. Unspecified
@@ -513,9 +523,10 @@ without changing declaration order, while `tool_choice:"none"` disables structur
 when the history contains earlier calls.
 
 NInfer does not execute functions or enforce JSON Schema through constrained decoding, so
-`strict:true`, required or named tool choice, hosted tools, remote MCP tools, and custom free-form
+required or named tool choice, hosted tools, remote MCP tools, and custom free-form
 tools are rejected. Deferred loading, output schemas, and caller restrictions that exclude direct
 invocation are also rejected because their semantics cannot be honored.
+`strict:true` is accepted as a model-side hint; NInfer does not enforce schema compliance.
 
 ### Response object and usage
 
@@ -686,9 +697,10 @@ selected template.
 
 User-defined, non-strict tools support `name`, `description`, object `input_schema`, and
 `input_examples`. `tool_choice:auto` and `none` are executable. Forced or named choice,
-`strict:true`, active single-call enforcement, deferred tools, tools that exclude direct model
+active single-call enforcement, deferred tools, tools that exclude direct model
 calls, Anthropic-provided/server tools, toolsets, MCP, and containers are rejected because their
-required constraint or executor is absent. `tool_result` preserves text/image order and marks
+required constraint or executor is absent. `strict:true` is accepted as a model-side hint;
+NInfer does not enforce schema compliance. `tool_result` preserves text/image order and marks
 `is_error:true` explicitly in the model prompt. For a visible Assistant tool-use turn, the next
 User turn must provide exactly one leading result for every declared ID; valid results are matched
 by ID and normalized to call order. A history that begins with results remains valid as a truncated

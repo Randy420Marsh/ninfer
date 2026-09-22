@@ -822,9 +822,7 @@ void lower_tools(const Json& body, GenerationRequest& request) {
                         "tools", "anthropic_tools_not_supported");
         }
         if (tool.strict) {
-            bad_request("strict=true requires generated tool input to satisfy the declared JSON "
-                        "Schema, which NInfer cannot guarantee",
-                        "tools", "strict_tools_not_supported");
+            // strict is a model-side hint; NInfer does not enforce schema compliance.
         }
         if (tool.defer_loading) {
             bad_request("defer_loading=true requires a deferred tool loader that NInfer does not "
