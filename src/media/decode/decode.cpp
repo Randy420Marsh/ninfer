@@ -228,6 +228,20 @@ public:
         return 0.0;
     }
 
+    // Demux-only count of the video stream's packets (one per frame for the supported codecs),
+    // for containers such as Matroska that record no frame count. Stops once past `limit`.
+    [[nodiscard]] int count_packets(int limit) {
+        int count = 0;
+        while (count <= limit) {
+            const int rc = av_read_frame(format_, packet_);
+            if (rc == AVERROR_EOF) { break; }
+            if (rc < 0) { throw_invalid_media("failed to read media packet: " + av_error(rc)); }
+            if (packet_->stream_index == stream_index_) { ++count; }
+            av_packet_unref(packet_);
+        }
+        return count;
+    }
+
     template <typename Callback>
     void frames(Callback&& callback) {
         int index    = 0;
@@ -489,11 +503,16 @@ VideoPlan make_video_plan(std::span<const std::uint8_t> bytes, const Policy& pol
                             ? static_cast<int>(probe.stream()->nb_frames)
                             : 0;
     plan.duration     = probe.duration_seconds();
-    if (plan.total_frames == 0 && plan.duration > 0.0) {
-        plan.total_frames = static_cast<int>(std::nearbyint(plan.duration * plan.fps));
-    }
     if (plan.duration > policy.max_video_duration_seconds) {
         throw Error(ErrorKind::BudgetExceeded, "video duration exceeds processor limit");
+    }
+    // duration x fps overcounts clips with dropped repeat frames or a variable rate, and
+    // sampled indices past the real last frame would not decode
+    if (plan.total_frames == 0) {
+        plan.total_frames = probe.count_packets(policy.max_video_source_frames);
+    }
+    if (plan.total_frames == 0 && plan.duration > 0.0) {
+        plan.total_frames = static_cast<int>(std::nearbyint(plan.duration * plan.fps));
     }
     if (plan.total_frames == 0) { plan.total_frames = count_frames(bytes, policy); }
     if (plan.total_frames == 0) { throw_invalid_media("video contains no decoded frame"); }
@@ -516,6 +535,7 @@ VideoPlan make_video_plan(std::span<const std::uint8_t> bytes, const Policy& pol
 struct VideoScan {
     ImageInfo first_frame;
     int sampled_frames = 0;
+    std::vector<double> frame_times;
 };
 
 template <typename Retain>
@@ -540,6 +560,10 @@ VideoScan scan_video(std::span<const std::uint8_t> bytes, const Policy& policy,
             }
             retained_pixels += pixels;
             if (wanted == 0) { scan.first_frame = info; }
+            const std::int64_t pts = frame->best_effort_timestamp;
+            scan.frame_times.push_back(pts != AV_NOPTS_VALUE
+                                           ? static_cast<double>(pts) * av_q2d(decoder.stream()->time_base)
+                                           : static_cast<double>(index) / plan.fps);
             retain(decoder, frame, plan.orientation);
             ++wanted;
         }
@@ -596,7 +620,8 @@ VideoInfo inspect_video(std::span<const std::uint8_t> bytes, const Policy& polic
     out.fps            = plan.fps;
     out.duration =
         plan.duration > 0.0 ? plan.duration : static_cast<double>(plan.total_frames) / plan.fps;
-    out.indices = std::move(plan.indices);
+    out.indices     = std::move(plan.indices);
+    out.frame_times = scan.frame_times;
     return out;
 }
 
@@ -636,9 +661,10 @@ Video decode_video(std::span<const std::uint8_t> bytes, const Policy& policy, do
         bytes, policy, plan, [&](Decoder& decoder, const AVFrame* frame, int orientation) {
             out.frames.push_back(decoder.rgb(frame, orientation, true));
         });
-    out.width   = scan.first_frame.width;
-    out.height  = scan.first_frame.height;
-    out.indices = std::move(plan.indices);
+    out.width       = scan.first_frame.width;
+    out.height      = scan.first_frame.height;
+    out.indices     = std::move(plan.indices);
+    out.frame_times = scan.frame_times;
     return out;
 }
 

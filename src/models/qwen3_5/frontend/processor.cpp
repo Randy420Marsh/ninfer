@@ -327,9 +327,17 @@ Prepared prepare_image(std::span<const std::uint8_t> bytes, const ProcessorOptio
     return out;
 }
 
-std::vector<double> video_timestamps(std::span<const int> indices, int temporal_groups,
-                                     double fps) {
-    std::vector<int> padded(indices.begin(), indices.end());
+// Mean presentation time of the two frames of each temporal group. Frame times come from the
+// container, so a constant-rate video gives index / fps and a clip cut from a longer source (or one
+// with dropped repeat frames) keeps its source times; index / fps is the fallback without times.
+std::vector<double> video_timestamps(std::span<const int> indices, std::span<const double> times,
+                                     int temporal_groups, double fps) {
+    std::vector<double> padded;
+    if (!times.empty()) {
+        padded.assign(times.begin(), times.end());
+    } else {
+        for (const int index : indices) { padded.push_back(static_cast<double>(index) / fps); }
+    }
     if (padded.size() % kTemporal != 0) { padded.push_back(padded.back()); }
     if (temporal_groups < 0 ||
         static_cast<std::size_t>(temporal_groups) > padded.size() / kTemporal) {
@@ -338,7 +346,7 @@ std::vector<double> video_timestamps(std::span<const int> indices, int temporal_
     std::vector<double> timestamps;
     timestamps.reserve(static_cast<std::size_t>(temporal_groups));
     for (int t = 0; t < temporal_groups; ++t) {
-        timestamps.push_back(static_cast<double>(padded[2 * t] + padded[2 * t + 1]) / (2.0 * fps));
+        timestamps.push_back((padded[2 * t] + padded[2 * t + 1]) / 2.0);
     }
     return timestamps;
 }
@@ -366,7 +374,7 @@ Prepared prepare_video(std::span<const std::uint8_t> bytes, const ProcessorOptio
     out.payload                = cache.allocate_payload(elements, control);
     for (media::decode::Image& frame : video.frames) { resize_bicubic(frame, size, control); }
     if (pad_temporal) { video.frames.push_back(video.frames.back()); }
-    out.item.timestamps = video_timestamps(video.indices, gt, video.fps);
+    out.item.timestamps = video_timestamps(video.indices, video.frame_times, gt, video.fps);
     std::size_t cursor  = 0;
     for (int t = 0; t < gt; ++t) {
         check_preparation_control(control);
@@ -467,7 +475,7 @@ VisionItem inspect_video_item(std::span<const std::uint8_t> bytes, const Process
     VisionItem item;
     item.modality   = Modality::Video;
     item.grid       = {gt, size.h / kPatch, size.w / kPatch};
-    item.timestamps = video_timestamps(video.indices, gt, video.fps);
+    item.timestamps = video_timestamps(video.indices, video.frame_times, gt, video.fps);
     return item;
 }
 

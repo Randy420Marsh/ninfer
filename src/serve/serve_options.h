@@ -2,6 +2,7 @@
 
 #include "ninfer/types.h"
 #include "product/logging/logging.h"
+#include "product/media_pipeline/pipeline.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -47,6 +48,10 @@ struct ServeOptions {
     SpeculativeOptions speculative;
     ContextCacheOptions context_cache;
     bool enable_vision      = false;
+    // Video/audio parts: segment sampling, detail, per-part token budget, dedup, transcripts.
+    product::media_pipeline::Settings media;
+    std::filesystem::path media_root; // --media-path: root for file:// media; empty disables file://
+    bool media_allow_private_urls = false; // media URLs may resolve to loopback/private addresses
     bool use_cuda_graph     = true;
     bool allow_prefix_reuse = true;
     std::optional<bool> enable_thinking;

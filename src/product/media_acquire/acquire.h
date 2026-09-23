@@ -46,4 +46,13 @@ struct Policy {
 
 std::vector<std::uint8_t> acquire_bytes(const Source& source, const Policy& policy = {});
 
+// Validates a remote media URL (scheme, credentials, remote/private-network policy) and follows
+// its redirects with the same check on every hop, fetching at most one byte of each; returns the
+// final URL, for readers that stream it themselves with seeks (HTTP range requests) and must not
+// follow further redirects.
+std::string resolve_remote_url(std::string url, const Policy& policy);
+
+// Canonical path of a Path source after the media-root check, without reading the file.
+std::filesystem::path resolve_media_path(const Source& source, const Policy& policy);
+
 } // namespace ninfer::product::media_acquire

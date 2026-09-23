@@ -1,6 +1,7 @@
 #include "serve/generation_service.h"
 
 #include "product/media_acquire/acquire.h"
+#include "product/media_pipeline/pipeline.h"
 #include "serve/translate.h"
 
 #include <algorithm>
@@ -145,16 +146,17 @@ using Clock = std::chrono::steady_clock;
 
 ninfer::OwnedMedia acquire_media(const ContentPart& part, Clock::time_point deadline,
                                  const std::function<bool()>& is_cancelled,
-                                 std::size_t& remaining_bytes) {
+                                 std::size_t& remaining_bytes, bool allow_private_urls) {
     if (remaining_bytes == 0) {
         throw_media_error(ninfer::product::media_acquire::Error(
             ninfer::product::media_acquire::ErrorKind::BudgetExceeded,
             "request media exceeds aggregate byte limit"));
     }
     ninfer::product::media_acquire::Policy policy;
-    policy.max_bytes    = std::min(policy.max_bytes, remaining_bytes);
-    policy.deadline     = deadline;
-    policy.is_cancelled = is_cancelled;
+    policy.max_bytes             = std::min(policy.max_bytes, remaining_bytes);
+    policy.deadline              = deadline;
+    policy.is_cancelled          = is_cancelled;
+    policy.allow_private_network = allow_private_urls;
     std::vector<std::uint8_t> source_bytes;
     try {
         source_bytes = ninfer::product::media_acquire::acquire_bytes(part.source, policy);
@@ -188,6 +190,88 @@ ninfer::OwnedMedia acquire_media(const ContentPart& part, Clock::time_point dead
 
 [[noreturn]] void throw_request_error(const ninfer::RequestError& exception) {
     throw ApiException(request_error_to_api_error(exception));
+}
+
+// Replaces every Video part with its prepared segment clips (plus segment headers and the audio
+// transcript) and every Audio part with its transcript, before prompt translation. Clips are
+// in-memory Bytes sources, so the normal acquisition and processor path handles them.
+GenerationRequest expand_media_parts(const GenerationRequest& request, const ServeOptions& options,
+                                     Clock::time_point deadline,
+                                     const std::function<bool()>& is_cancelled) {
+    bool any = false;
+    for (const ChatTurn& turn : request.messages) {
+        for (const ContentPart& part : turn.content) {
+            any = any || part.kind == ContentKind::Video || part.kind == ContentKind::Audio;
+        }
+    }
+    if (!any) { return request; }
+    GenerationRequest out = request;
+    for (ChatTurn& turn : out.messages) {
+        std::vector<ContentPart> expanded;
+        for (ContentPart& part : turn.content) {
+            if (part.kind != ContentKind::Video && part.kind != ContentKind::Audio) {
+                expanded.push_back(std::move(part));
+                continue;
+            }
+            if (part.source.kind == ninfer::product::media_acquire::SourceKind::Path &&
+                options.media_root.empty()) {
+                throw_invalid_input(std::invalid_argument("file:// media needs ninfer-serve --media-path"),
+                                    "invalid_media");
+            }
+            ninfer::product::media_acquire::Policy policy;
+            policy.max_bytes    = std::min(options.max_request_bytes, ninfer::kMaximumPromptMediaBytes);
+            policy.deadline     = deadline;
+            policy.is_cancelled = is_cancelled;
+            policy.media_root   = options.media_root;
+            policy.allow_private_network = options.media_allow_private_urls;
+            if (part.source.kind == ninfer::product::media_acquire::SourceKind::Path) {
+                // file:///C:/x arrives as "/C:/x"; relative paths resolve under the media root and
+                // resolve_media_path rejects anything that escapes it.
+                std::string value = part.source.value;
+                if (value.size() > 2 && value[0] == '/' && value[2] == ':') { value.erase(0, 1); }
+                const std::filesystem::path path(value);
+                part.source.value = path.has_root_path() ? path.string()
+                                                         : (options.media_root / path).string();
+            }
+            std::vector<ninfer::product::media_pipeline::Piece> pieces;
+            try {
+                pieces = part.kind == ContentKind::Video
+                             ? ninfer::product::media_pipeline::prepare_video(part.source, part.media,
+                                                                              options.media, policy)
+                             : ninfer::product::media_pipeline::prepare_audio(part.source, part.media,
+                                                                              options.media, policy);
+            } catch (const ninfer::product::media_acquire::Error& exception) {
+                throw_media_error(exception);
+            } catch (const std::invalid_argument& exception) {
+                throw_invalid_input(exception, "invalid_media");
+            } catch (const std::runtime_error& exception) {
+                ApiError error;
+                error.status  = 502;
+                error.type    = "server_error";
+                error.param   = "messages";
+                error.code    = "media_processing_failed";
+                error.message = exception.what();
+                throw ApiException(std::move(error));
+            }
+            for (auto& piece : pieces) {
+                ContentPart next;
+                next.type_raw = part.type_raw;
+                if (piece.is_video) {
+                    next.kind               = ContentKind::Video;
+                    next.source.kind        = ninfer::product::media_acquire::SourceKind::Bytes;
+                    next.source.media_type  = "video/x-matroska";
+                    next.source.bytes       = std::move(piece.clip);
+                } else {
+                    next.kind = ContentKind::Text;
+                    next.text = std::move(piece.text);
+                }
+                expanded.push_back(std::move(next));
+            }
+            if (!expanded.empty()) { expanded.back().cache_boundary_after = part.cache_boundary_after; }
+        }
+        turn.content = std::move(expanded);
+    }
+    return out;
 }
 
 void check_preparation_control(Clock::time_point deadline,
@@ -251,7 +335,14 @@ GenerationService::GenerationService(ServeOptions options, StartupObserver start
     engine_options.media_cache_bytes        = options_.media_cache_bytes;
     engine_options.media_live_bytes         = options_.media_live_bytes;
     engine_options.media_preprocess_threads = options_.media_preprocess_threads;
-    engine_options.startup_observer         = std::move(startup_observer);
+    // Videos reach the processor as budgeted clips: two frames of 32x32 px per merged token, plus
+    // one padding frame at the largest detail so the processor never rescales a planned clip. The
+    // clip length is bounded by the budget rather than by a duration cap.
+    engine_options.video_max_pixels =
+        (static_cast<std::uint64_t>(options_.media.max_tokens) + 2048U) * 2048U;
+    engine_options.video_max_seconds = 48.0 * 3600.0;
+    engine_options.video_fps         = options_.media.fps;
+    engine_options.startup_observer  = std::move(startup_observer);
     engine_           = std::make_unique<ninfer::Engine>(std::move(engine_options));
     request_capacity_ = std::make_shared<RequestCapacity>(
         static_cast<std::size_t>(options_.max_concurrency) + options_.max_pending_requests);
@@ -315,12 +406,14 @@ PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request
 
     try {
         const auto acquisition_started = Clock::now();
+        const GenerationRequest media_request =
+            expand_media_parts(request, options_, prepared.lifetime->deadline, is_cancelled);
         std::size_t remaining_media_bytes =
             std::min(options_.max_request_bytes, ninfer::kMaximumPromptMediaBytes);
         ninfer::PromptInput input =
-            to_prompt_input(request, semantics, [&](const ContentPart& part) {
+            to_prompt_input(media_request, semantics, [&](const ContentPart& part) {
                 return acquire_media(part, prepared.lifetime->deadline, is_cancelled,
-                                     remaining_media_bytes);
+                                     remaining_media_bytes, options_.media_allow_private_urls);
             });
         std::vector<PromptCacheMarker> protocol_markers = std::move(input.context_cache.markers);
         const bool protocol_allows_engine_automatic =
@@ -375,11 +468,14 @@ int GenerationService::count_prompt_tokens(const GenerationRequest& request,
         Clock::now() + std::chrono::milliseconds(options_.pending_timeout_ms);
     const ResolvedPromptSemantics semantics = resolve_prompt_semantics(request, options_);
     try {
+        const GenerationRequest media_request =
+            expand_media_parts(request, options_, deadline, is_cancelled);
         std::size_t remaining_media_bytes =
             std::min(options_.max_request_bytes, ninfer::kMaximumPromptMediaBytes);
         ninfer::PromptInput input =
-            to_prompt_input(request, semantics, [&](const ContentPart& part) {
-                return acquire_media(part, deadline, is_cancelled, remaining_media_bytes);
+            to_prompt_input(media_request, semantics, [&](const ContentPart& part) {
+                return acquire_media(part, deadline, is_cancelled, remaining_media_bytes,
+                                     options_.media_allow_private_urls);
             });
         check_preparation_control(deadline, is_cancelled);
         const PreparationControl control{

@@ -1,0 +1,24 @@
+{
+  "name": "ninfer",
+  "version-string": "0.1.0",
+  "dependencies": [
+    {
+      "name": "ffmpeg",
+      "features": [
+        "avcodec",
+        "avformat",
+        "swscale",
+        "zlib"
+      ]
+    },
+    {
+      "name": "curl",
+      "default-features": false,
+      "features": [
+        "ssl",
+        "non-http"
+      ]
+    }
+  ],
+  "builtin-baseline": "3216b5541d1e352dbafbe014e154877cc1521f31"
+}

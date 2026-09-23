@@ -256,7 +256,7 @@ void validate_compatibility_hints(const Json& body) {
 }
 
 ninfer::product::media_acquire::Source parse_media_url(const Json& part, const char* field,
-                                                       bool image) {
+                                                       bool image, bool allow_file = false) {
     if (!part.contains(field)) {
         bad_request(std::string(field) + " content part must contain " + field, "messages");
     }
@@ -294,10 +294,141 @@ ninfer::product::media_acquire::Source parse_media_url(const Json& part, const c
         source.kind = ninfer::product::media_acquire::SourceKind::Data;
     } else if (source.value.starts_with("http://") || source.value.starts_with("https://")) {
         source.kind = ninfer::product::media_acquire::SourceKind::Url;
+    } else if (allow_file && source.value.starts_with("file://")) {
+        // resolved under --media-path at acquisition; rejected when no media root is configured
+        source.kind  = ninfer::product::media_acquire::SourceKind::Path;
+        source.value = source.value.substr(7);
     } else {
         bad_request(std::string(field) + " must use HTTP(S) or a data URI", "messages");
     }
     return source;
+}
+
+// llama.cpp's Chat Completions extensions {"type": "input_video", "input_video": {"data": ...}}
+// and OpenAI's {"type": "input_audio", "input_audio": {"data": ...}}: the value is an HTTP(S) URL,
+// a data URI, a file:// path, or bare base64 bytes, and "url" is accepted in place of "data".
+// Bare base64 becomes a data URI; the container is probed from the bytes.
+ninfer::product::media_acquire::Source parse_inline_media(const Json& part, const char* field) {
+    if (!part.contains(field) || !part.at(field).is_object()) {
+        bad_request(std::string(field) + " content part must contain an " + field + " object",
+                    "messages");
+    }
+    const Json& value = part.at(field);
+    const char* key   = value.contains("data") ? "data" : "url";
+    if (!value.contains(key) || !value.at(key).is_string() ||
+        value.at(key).get_ref<const std::string&>().empty()) {
+        bad_request(std::string(field) + " must contain a non-empty data or url string", "messages");
+    }
+    std::string data = value.at(key).get<std::string>();
+    if (!data.starts_with("data:") && !data.starts_with("http://") &&
+        !data.starts_with("https://") && !data.starts_with("file://")) {
+        if (data.find("://") != std::string::npos) {
+            bad_request(std::string(field) + " must use HTTP(S), file://, a data URI, or base64 data",
+                        "messages");
+        }
+        data = "data:application/octet-stream;base64," + data;
+    }
+    return parse_media_url(Json{{field, std::move(data)}}, field, false, true);
+}
+
+double parse_media_time(const Json& value, const std::string& field) {
+    if (value.is_number()) {
+        const double seconds = value.get<double>();
+        if (!(seconds >= 0.0)) { bad_request(field + " must not be negative", "messages"); }
+        return seconds;
+    }
+    if (!value.is_string()) {
+        bad_request(field + " must be seconds or a \"hh:mm:ss\" string", "messages");
+    }
+    try {
+        return ninfer::product::media_pipeline::parse_time(value.get<std::string>());
+    } catch (const std::invalid_argument& error) { bad_request(field + ": " + error.what(), "messages"); }
+}
+
+ninfer::product::media_pipeline::Segment parse_segment(const Json& value, const std::string& field) {
+    ninfer::product::media_pipeline::Segment segment;
+    if (value.contains("start")) { segment.start = parse_media_time(value.at("start"), field + ".start"); }
+    if (value.contains("end")) {
+        segment.end = parse_media_time(value.at("end"), field + ".end");
+    } else if (value.contains("duration")) {
+        segment.end = segment.start + parse_media_time(value.at("duration"), field + ".duration");
+    }
+    return segment;
+}
+
+// Per-part video/audio options (NInfer and llama.cpp extension): which parts of the media to use,
+// how densely and at what detail to sample them, the part's token budget, and the transcript.
+ninfer::product::media_pipeline::MediaRequest parse_media_options(const Json& part,
+                                                                  const char* field) {
+    ninfer::product::media_pipeline::MediaRequest request;
+    if (!part.contains(field) || !part.at(field).is_object()) { return request; }
+    const Json& value       = part.at(field);
+    const std::string where = field;
+    if (value.contains("segments")) {
+        const Json& segments = value.at("segments");
+        if (!segments.is_array() || segments.empty() || segments.size() > 256) {
+            bad_request(where + ".segments must be an array of 1 to 256 {start, end} objects", "messages");
+        }
+        for (const Json& segment : segments) {
+            if (!segment.is_object()) { bad_request(where + ".segments entries must be objects", "messages"); }
+            request.segments.push_back(parse_segment(segment, where + ".segments[]"));
+        }
+    } else if (value.contains("start") || value.contains("end") || value.contains("duration")) {
+        request.segments.push_back(parse_segment(value, where));
+    }
+    if (value.contains("fps")) {
+        if (!value.at("fps").is_number() || !(value.at("fps").get<double>() > 0.0)) {
+            bad_request(where + ".fps must be a positive number", "messages");
+        }
+        request.fps = value.at("fps").get<double>();
+    }
+    if (value.contains("detail")) {
+        const Json& detail = value.at("detail");
+        if (detail.is_number_integer()) {
+            request.detail_tokens = std::max(16, detail.get<int>());
+            request.detail_name   = std::to_string(*request.detail_tokens) + " tokens";
+        } else if (detail.is_string()) {
+            try {
+                request.detail_tokens =
+                    ninfer::product::media_pipeline::detail_level_tokens(detail.get<std::string>());
+            } catch (const std::invalid_argument& error) {
+                bad_request(where + ".detail: " + error.what(), "messages");
+            }
+            request.detail_name = detail.get<std::string>();
+        } else {
+            bad_request(where + ".detail must be low, standard, high, max or a token count", "messages");
+        }
+    }
+    for (const char* key : {"max_tokens", "max_frames"}) {
+        if (!value.contains(key)) { continue; }
+        if (!value.at(key).is_number_integer() || value.at(key).get<int>() <= 0) {
+            bad_request(where + "." + key + " must be a positive integer", "messages");
+        }
+        (std::string_view(key) == "max_tokens" ? request.max_tokens : request.max_frames) =
+            value.at(key).get<int>();
+    }
+    if (value.contains("audio")) {
+        const Json& audio = value.at("audio");
+        if (audio.is_boolean()) {
+            request.audio = audio.get<bool>() ? "auto" : "none";
+        } else if (audio.is_string()) {
+            request.audio = audio.get<std::string>();
+        } else {
+            bad_request(where + ".audio must be auto, transcript, none or a boolean", "messages");
+        }
+    } else if (value.contains("transcribe")) {
+        request.audio = get_bool(value, "transcribe", true) ? "transcript" : "none";
+    }
+    if (request.audio != "auto" && request.audio != "transcript" && request.audio != "none") {
+        bad_request(where + ".audio must be auto, transcript or none (served models have no audio "
+                            "encoder; audio is transcribed)",
+                    "messages", "modality_not_supported");
+    }
+    if (value.contains("language")) {
+        if (!value.at("language").is_string()) { bad_request(where + ".language must be a string", "messages"); }
+        request.language = value.at("language").get<std::string>();
+    }
+    return request;
 }
 
 void parse_content_parts(const Json& content, ChatTurn& turn, std::size_t index) {
@@ -348,7 +479,26 @@ void parse_content_parts(const Json& content, ChatTurn& turn, std::size_t index)
                             "modality_not_supported");
             }
             parsed.kind   = ContentKind::Video;
-            parsed.source = parse_media_url(part, "video_url", false);
+            parsed.source = parse_media_url(part, "video_url", false, true);
+            parsed.media  = parse_media_options(part, "video_url");
+        } else if (type == "input_video") {
+            if (turn.role != ChatRole::User) {
+                bad_request("input_video is only supported on user messages", "messages",
+                            "modality_not_supported");
+            }
+            parsed.kind   = ContentKind::Video;
+            parsed.source = parse_inline_media(part, "input_video");
+            parsed.media  = parse_media_options(part, "input_video");
+        } else if (type == "input_audio" || type == "audio_url") {
+            // no served model has an audio encoder: the audio is transcribed (--asr-url) into text
+            if (turn.role != ChatRole::User) {
+                bad_request(type + " is only supported on user messages", "messages",
+                            "modality_not_supported");
+            }
+            parsed.kind   = ContentKind::Audio;
+            parsed.source = type == "input_audio" ? parse_inline_media(part, "input_audio")
+                                                  : parse_media_url(part, "audio_url", false, true);
+            parsed.media  = parse_media_options(part, type.c_str());
         } else {
             bad_request("content type '" + type + "' is not supported", "messages",
                         "modality_not_supported");

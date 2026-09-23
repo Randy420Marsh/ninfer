@@ -166,7 +166,13 @@ struct EngineOptions {
     // Zero selects a bounded worker count from the detected host concurrency.
     std::uint32_t media_preprocess_threads = 0;
     bool enable_vision                     = false;
-    bool use_cuda_graph                    = true;
+    // Per-video pixel budget over all sampled frames (0 = the artifact's video_preprocessor_config
+    // longest_edge), video duration limit (0 = processor default), and a sampling rate the
+    // processor may not thin below (0 = the artifact's fps only).
+    std::uint64_t video_max_pixels = 0;
+    double video_max_seconds       = 0.0;
+    double video_fps               = 0.0;
+    bool use_cuda_graph            = true;
     ContextCacheOptions context_cache;
     ContextCostOptions context_cost;
     StartupObserver startup_observer;

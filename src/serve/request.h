@@ -1,6 +1,7 @@
 #pragma once
 
 #include "product/media_acquire/source.h"
+#include "product/media_pipeline/pipeline.h"
 
 #include <ninfer/types.h>
 
@@ -51,6 +52,7 @@ enum class ContentKind {
     Text,
     Image,
     Video,
+    Audio, // transcribed into Text before the Engine sees the request
 };
 
 struct CacheBoundary {
@@ -73,6 +75,8 @@ struct ContentPart {
     std::string type_raw; // original wire "type" string for diagnostics
     ninfer::product::media_acquire::Source source;
     ninfer::ImageResizePolicy image_resize_policy = ninfer::ImageResizePolicy::Downsize;
+    // Video/Audio: segments, sampling, detail, budget and transcript options from the wire.
+    ninfer::product::media_pipeline::MediaRequest media;
     std::optional<CacheBoundary> cache_boundary_after;
 };
 

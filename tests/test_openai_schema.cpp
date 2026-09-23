@@ -374,6 +374,76 @@ int test_messages_and_media() {
                           media.messages[0].content[1].kind == ContentKind::Video,
                       "image and video compatibility inputs normalize to Engine media");
 
+    {
+        // llama.cpp's input_video extension: data or url; URL, data URI, or bare base64.
+        auto input_video = [&](Json video) {
+            Json request                       = base_request();
+            request["messages"][0]["content"] = Json::array(
+                {Json{{"type", "input_video"}, {"input_video", std::move(video)}}});
+            return request;
+        };
+        const GenerationRequest data_uri =
+            parse(input_video(Json{{"data", "data:video/mp4;base64,AAAA"}})).generation;
+        const GenerationRequest bare =
+            parse(input_video(Json{{"data", "AAAA"}})).generation;
+        const GenerationRequest url =
+            parse(input_video(Json{{"url", "https://example.test/a.mp4"}})).generation;
+        failures += check(
+            data_uri.messages[0].content[0].kind == ContentKind::Video &&
+                data_uri.messages[0].content[0].source.value == "data:video/mp4;base64,AAAA" &&
+                bare.messages[0].content[0].kind == ContentKind::Video &&
+                bare.messages[0].content[0].source.value ==
+                    "data:application/octet-stream;base64,AAAA" &&
+                url.messages[0].content[0].kind == ContentKind::Video &&
+                url.messages[0].content[0].source.value == "https://example.test/a.mp4",
+            "llama.cpp input_video data URI, bare base64 and url normalize to Engine video");
+        const GenerationRequest file =
+            parse(input_video(Json{{"data", "file://clips/a.mp4"}})).generation;
+        failures += check(file.messages[0].content[0].source.kind ==
+                                  ninfer::product::media_acquire::SourceKind::Path &&
+                              file.messages[0].content[0].source.value == "clips/a.mp4",
+                          "input_video file:// becomes a media-root-relative path source");
+        failures += check(
+            api_error([&] { (void)parse(input_video(Json{{"data", "ftp://host/a.mp4"}})); }).param ==
+                "messages",
+            "input_video rejects other URL schemes");
+        failures += check(
+            api_error([&] { (void)parse(input_video(Json::object())); }).param == "messages",
+            "input_video without data or url rejected");
+
+        // per-part media options: segments, sampling, detail, budget, transcript
+        Json options = Json{{"url", "https://example.test/long.mp4"},
+                            {"segments", Json::array({Json{{"start", "01:00:00"}, {"end", 3630}},
+                                                      Json{{"start", 36000}, {"duration", "90s"}}})},
+                            {"fps", 1},
+                            {"detail", "high"},
+                            {"max_tokens", 20000},
+                            {"max_frames", 300},
+                            {"audio", "transcript"},
+                            {"language", "fi"}};
+        Json video_url = base_request();
+        video_url["messages"][0]["content"] =
+            Json::array({Json{{"type", "video_url"}, {"video_url", options}}});
+        const auto parsed_options = parse(video_url);
+        const auto& media         = parsed_options.generation.messages[0].content[0].media;
+        failures += check(media.segments.size() == 2 && media.segments[0].start == 3600.0 &&
+                              media.segments[0].end == 3630.0 && media.segments[1].start == 36000.0 &&
+                              media.segments[1].end == 36090.0 && media.fps == 1.0 &&
+                              media.detail_tokens == 1024 && media.max_tokens == 20000 &&
+                              media.max_frames == 300 && media.audio == "transcript" &&
+                              media.language == "fi",
+                          "video_url media options parse (hh:mm:ss, seconds, durations)");
+        for (const auto& [key, bad] : {std::pair<const char*, Json>{"detail", "ultra"},
+                                       std::pair<const char*, Json>{"fps", 0},
+                                       std::pair<const char*, Json>{"audio", "native"},
+                                       std::pair<const char*, Json>{"max_tokens", -5}}) {
+            Json invalid = video_url;
+            invalid["messages"][0]["content"][0]["video_url"][key] = bad;
+            failures += check(api_error([&] { (void)parse(invalid); }).param == "messages",
+                              std::string("invalid video_url.") + key + " rejected");
+        }
+    }
+
     body["messages"][0]["content"][0]["image_url"]["detail"] = "high";
     failures += check(api_error([&] { (void)parse(body); }).code == "image_detail_not_supported",
                       "explicit image preprocessing detail rejected");
@@ -419,10 +489,20 @@ int test_messages_and_media() {
                       "tool result video remains outside the Chat compatibility extension");
 
     body = base_request();
+    body["messages"][0]["content"] = Json::array(
+        {Json{{"type", "input_audio"}, {"input_audio", Json{{"data", "UklGRg=="}, {"format", "wav"}}}}});
+    failures += check(parse(body).generation.messages[0].content[0].kind == ContentKind::Audio,
+                      "input_audio becomes an Audio part (transcribed before the Engine)");
     body["messages"][0]["content"] =
         Json::array({Json{{"type", "input_audio"}, {"input_audio", Json::object()}}});
+    failures += check(api_error([&] { (void)parse(body); }).param == "messages",
+                      "input_audio without data rejected");
+    body["messages"][0]["role"]    = "assistant";
+    body["messages"][0]["content"] = Json::array(
+        {Json{{"type", "input_audio"}, {"input_audio", Json{{"data", "UklGRg=="}}}}});
     failures += check(api_error([&] { (void)parse(body); }).code == "modality_not_supported",
-                      "input audio rejected");
+                      "assistant audio history rejected");
+    body = base_request();
     body["messages"][0]["content"] =
         Json::array({Json{{"type", "file"}, {"file", Json::object()}}});
     failures += check(api_error([&] { (void)parse(body); }).code == "modality_not_supported",

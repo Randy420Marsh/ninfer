@@ -204,14 +204,18 @@ std::size_t curl_write(char* data, std::size_t size, std::size_t count, void* op
     return amount;
 }
 
-std::vector<std::uint8_t> fetch_url(std::string url, const Policy& policy) {
-    if (!policy.allow_remote) { throw std::invalid_argument("remote media URLs are disabled"); }
+void init_curl() {
     static std::once_flag init;
     std::call_once(init, [] {
         if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK) {
             throw std::runtime_error("failed to initialize libcurl");
         }
     });
+}
+
+std::vector<std::uint8_t> fetch_url(std::string url, const Policy& policy) {
+    if (!policy.allow_remote) { throw std::invalid_argument("remote media URLs are disabled"); }
+    init_curl();
 
     for (int redirect = 0; redirect <= policy.max_redirects; ++redirect) {
         check_control(policy);
@@ -283,22 +287,8 @@ std::vector<std::uint8_t> fetch_url(std::string url, const Policy& policy) {
 }
 std::vector<std::uint8_t> read_path(const Source& source, const Policy& policy) {
     check_control(policy);
+    const std::filesystem::path path = resolve_media_path(source, policy);
     std::error_code ec;
-    std::filesystem::path path = std::filesystem::weakly_canonical(source.value, ec);
-    if (ec || !std::filesystem::is_regular_file(path, ec)) {
-        throw std::invalid_argument("media path is not a regular file: " + source.value);
-    }
-    if (!policy.media_root.empty()) {
-        const std::filesystem::path root = std::filesystem::weakly_canonical(policy.media_root, ec);
-        const auto relative              = std::filesystem::relative(path, root, ec);
-#if defined(_WIN32)
-        if (ec || relative.empty() || relative.native().starts_with(L"..")) {
-#else
-        if (ec || relative.empty() || relative.native().starts_with("..")) {
-#endif
-            throw std::invalid_argument("media path is outside configured media root");
-        }
-    }
     const std::uintmax_t size = std::filesystem::file_size(path, ec);
     check_control(policy);
     if (ec) { throw std::invalid_argument("failed to inspect media file: " + source.value); }
@@ -325,6 +315,93 @@ std::vector<std::uint8_t> read_path(const Source& source, const Policy& policy) 
 }
 
 } // namespace
+
+std::string resolve_remote_url(std::string url, const Policy& policy) {
+    if (!policy.allow_remote) { throw std::invalid_argument("remote media URLs are disabled"); }
+    init_curl();
+
+    // one-byte range probes, validating every redirect hop like fetch_url does
+    for (int redirect = 0; redirect <= policy.max_redirects; ++redirect) {
+        check_control(policy);
+        const UrlParts parts = parse_url(url);
+        const std::string ip = resolve_public(parts, policy.allow_private_network);
+        check_control(policy);
+        std::string resolve = parts.host + ":" + parts.port + ":";
+        resolve += ip.find(':') == std::string::npos ? ip : "[" + ip + "]";
+        curl_slist* resolve_list = curl_slist_append(nullptr, resolve.c_str());
+        if (resolve_list == nullptr) { throw std::bad_alloc(); }
+        std::unique_ptr<curl_slist, decltype(&curl_slist_free_all)> resolve_guard(
+            resolve_list, curl_slist_free_all);
+        std::unique_ptr<CURL, decltype(&curl_easy_cleanup)> curl(curl_easy_init(),
+                                                                 curl_easy_cleanup);
+        if (!curl) { throw std::runtime_error("failed to create libcurl handle"); }
+        // servers that ignore Range get cut off after the first 64 KiB
+        CurlBuffer buffer{.bytes = {}, .limit = 64U << 10};
+        curl_easy_setopt(curl.get(), CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl.get(), CURLOPT_PROTOCOLS_STR, "http,https");
+        curl_easy_setopt(curl.get(), CURLOPT_FOLLOWLOCATION, 0L);
+        curl_easy_setopt(curl.get(), CURLOPT_RANGE, "0-0");
+        curl_easy_setopt(curl.get(), CURLOPT_CONNECTTIMEOUT_MS,
+                         bounded_timeout_ms(policy, policy.connect_timeout_ms));
+        curl_easy_setopt(curl.get(), CURLOPT_TIMEOUT_MS,
+                         bounded_timeout_ms(policy, policy.timeout_ms));
+        curl_easy_setopt(curl.get(), CURLOPT_NOSIGNAL, 1L);
+        curl_easy_setopt(curl.get(), CURLOPT_SSL_VERIFYPEER, 1L);
+        curl_easy_setopt(curl.get(), CURLOPT_SSL_VERIFYHOST, 2L);
+        curl_easy_setopt(curl.get(), CURLOPT_PROXY, "");
+        curl_easy_setopt(curl.get(), CURLOPT_RESOLVE, resolve_list);
+        curl_easy_setopt(curl.get(), CURLOPT_WRITEFUNCTION, curl_write);
+        curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, &buffer);
+        curl_easy_setopt(curl.get(), CURLOPT_NOPROGRESS, 0L);
+        curl_easy_setopt(curl.get(), CURLOPT_XFERINFOFUNCTION, curl_progress);
+        curl_easy_setopt(curl.get(), CURLOPT_XFERINFODATA, &policy);
+        curl_easy_setopt(curl.get(), CURLOPT_USERAGENT, "ninfer/vision");
+        const CURLcode code = curl_easy_perform(curl.get());
+        long status         = 0;
+        curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &status);
+        if (code != CURLE_OK && !(code == CURLE_WRITE_ERROR && status != 0)) {
+            check_control(policy);
+            if (code == CURLE_OPERATION_TIMEDOUT) {
+                throw Error(ErrorKind::RemoteTimeout,
+                            "media URL timed out: " + std::string(curl_easy_strerror(code)));
+            }
+            throw Error(ErrorKind::RemoteUnavailable,
+                        "failed to reach media URL: " + std::string(curl_easy_strerror(code)));
+        }
+        if (status >= 200 && status < 300) { return url; }
+        if (status < 300 || status >= 400 || redirect == policy.max_redirects) {
+            throw Error(ErrorKind::RemoteUnavailable,
+                        "media URL returned HTTP " + std::to_string(status));
+        }
+        char* next = nullptr;
+        curl_easy_getinfo(curl.get(), CURLINFO_REDIRECT_URL, &next);
+        if (next == nullptr || *next == '\0') {
+            throw Error(ErrorKind::RemoteUnavailable, "media URL redirect has no location");
+        }
+        url = next;
+    }
+    throw Error(ErrorKind::RemoteUnavailable, "too many media URL redirects");
+}
+
+std::filesystem::path resolve_media_path(const Source& source, const Policy& policy) {
+    std::error_code ec;
+    std::filesystem::path path = std::filesystem::weakly_canonical(source.value, ec);
+    if (ec || !std::filesystem::is_regular_file(path, ec)) {
+        throw std::invalid_argument("media path is not a regular file: " + source.value);
+    }
+    if (!policy.media_root.empty()) {
+        const std::filesystem::path root = std::filesystem::weakly_canonical(policy.media_root, ec);
+        const auto relative              = std::filesystem::relative(path, root, ec);
+#if defined(_WIN32)
+        if (ec || relative.empty() || relative.native().starts_with(L"..")) {
+#else
+        if (ec || relative.empty() || relative.native().starts_with("..")) {
+#endif
+            throw std::invalid_argument("media path is outside configured media root");
+        }
+    }
+    return path;
+}
 
 std::vector<std::uint8_t> acquire_bytes(const Source& source, const Policy& policy) {
     if (policy.max_bytes == 0) { throw std::invalid_argument("media byte limit must be positive"); }

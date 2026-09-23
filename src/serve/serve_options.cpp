@@ -4,6 +4,7 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -81,6 +82,10 @@ std::string serve_usage_text(const char* argv0) {
            "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens N] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
            "[--vision] [--no-cuda-graph] [--no-prefix-reuse] "
+           "[--video-fps F] [--video-min-fps F] [--video-detail low|standard|high|max] "
+           "[--video-max-tokens N] [--video-max-frames N] [--video-dedup F] [--media-path DIR] "
+           "[--media-allow-private-urls] "
+           "[--asr-url URL] [--asr-model NAME] [--asr-language LANG] "
            "[--chat-template FILE] [--lm-head-draft] [--no-thinking] [--preserve-thinking] "
            "[--cors] "
            "[--temperature F] [--top-p F] [--top-k N] [--min-p F] [--presence-penalty F] "
@@ -100,6 +105,15 @@ std::string serve_usage_text(const char* argv0) {
            "default\n"
            "       --log-stats-interval-ms defaults to 5000; 0 disables periodic throughput logs\n"
            "       --vision enables media and loads the fixed Vision GPU allocations\n"
+           "       video parts are cut to their requested segments (seeking in URLs/files), sampled at\n"
+           "       --video-fps (default 2, also the maximum) and scaled to --video-detail (default\n"
+           "       standard: 20px text on 1080p stays readable); fps is lowered to fit\n"
+           "       --video-max-tokens (default 24576, at most 32768) and --video-max-frames (768),\n"
+           "       never below --video-min-fps (0.05); --video-dedup (default 4, 0 = off) drops frame\n"
+           "       groups with no region changed; --media-path allows file:// media under DIR\n"
+           "       --media-allow-private-urls lets media URLs reach loopback/LAN hosts (off: public only)\n"
+           "       --asr-url points at an OpenAI-compatible /v1/audio/transcriptions server; video\n"
+           "       audio tracks and input_audio/audio_url parts become timestamped transcripts\n"
            "       --kv-capacity auto leaves " +
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
            " MiB of sizing headroom\n"
@@ -281,6 +295,45 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.default_thinking_budget = static_cast<std::uint32_t>(budget);
         } else if (arg == "--vision") {
             options.enable_vision = true;
+        } else if (arg == "--video-fps") {
+            options.media.fps = parse_float_in(require_value("--video-fps"), "video-fps", 0.01f, 30.0f);
+        } else if (arg == "--video-min-fps") {
+            options.media.min_fps =
+                parse_float_in(require_value("--video-min-fps"), "video-min-fps", 0.001f, 30.0f);
+        } else if (arg == "--video-detail") {
+            options.media.detail_name   = require_value("--video-detail");
+            options.media.detail_tokens = product::media_pipeline::detail_level_tokens(options.media.detail_name);
+        } else if (arg == "--video-max-tokens") {
+            const int tokens = parse_nonnegative_int(require_value("--video-max-tokens"), "video-max-tokens");
+            if (tokens < 64 || tokens > 32768) {
+                // the Vision runtime holds at most 32768 merged tokens per prompt
+                throw std::invalid_argument("--video-max-tokens must be in [64,32768]");
+            }
+            options.media.max_tokens = tokens;
+        } else if (arg == "--video-max-frames") {
+            const int frames = parse_nonnegative_int(require_value("--video-max-frames"), "video-max-frames");
+            if (frames < 4 || frames > 768) {
+                throw std::invalid_argument("--video-max-frames must be in [4,768]");
+            }
+            options.media.max_frames = frames;
+        } else if (arg == "--video-dedup") {
+            options.media.dedup = parse_float_in(require_value("--video-dedup"), "video-dedup", 0.0f, 255.0f);
+        } else if (arg == "--media-path") {
+            options.media_root = require_value("--media-path");
+            if (!std::filesystem::is_directory(options.media_root)) {
+                throw std::invalid_argument("--media-path must be an existing directory");
+            }
+        } else if (arg == "--media-allow-private-urls") {
+            options.media_allow_private_urls = true;
+        } else if (arg == "--asr-url") {
+            options.media.asr_url = require_value("--asr-url");
+            if (!options.media.asr_url.starts_with("http://") && !options.media.asr_url.starts_with("https://")) {
+                throw std::invalid_argument("--asr-url must be an http(s) URL");
+            }
+        } else if (arg == "--asr-model") {
+            options.media.asr_model = require_value("--asr-model");
+        } else if (arg == "--asr-language") {
+            options.media.asr_language = require_value("--asr-language");
         } else if (arg == "--no-cuda-graph") {
             options.use_cuda_graph = false;
         } else if (arg == "--no-prefix-reuse") {

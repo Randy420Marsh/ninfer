@@ -140,7 +140,8 @@ void validate_pixel_pipeline(const Json& config, std::string_view resource) {
     }
 }
 
-fi::ProcessorOptions processor_options(const FrontendResources& resources) {
+fi::ProcessorOptions processor_options(const FrontendResources& resources,
+                                       const FrontendOptions& frontend) {
     const Json image =
         parse_resource_json(resources.preprocessor_config_json, "preprocessor_config.json");
     const Json video = parse_resource_json(resources.video_preprocessor_config_json,
@@ -175,6 +176,16 @@ fi::ProcessorOptions processor_options(const FrontendResources& resources) {
         throw std::invalid_argument(
             "video_preprocessor_config.json does not match registered sampling defaults");
     }
+    // The released video budget is deliberately small (Qwen model cards recommend raising
+    // longest_edge for long videos); serving sets it from its video token budget.
+    if (frontend.video_max_pixels != 0) {
+        options.video_max_pixels = std::max(frontend.video_max_pixels, options.video_min_pixels);
+    }
+    if (frontend.video_max_seconds > 0.0) {
+        options.max_video_duration_seconds = frontend.video_max_seconds;
+    }
+    // serving pre-samples clips; a higher serving rate must not be thinned back to the default
+    options.video_fps = std::max(options.video_fps, frontend.video_fps);
 
     return options;
 }
@@ -612,7 +623,8 @@ public:
     Impl(const FrontendResources& resources, FrontendOptions options)
         : chat_template(compile_chat_template(resources, options.chat_template_path)),
           tokenizer(resources.tokenizer),
-          processor(options.vision_enabled ? processor_options(resources) : fi::ProcessorOptions{}),
+          processor(options.vision_enabled ? processor_options(resources, options)
+                                           : fi::ProcessorOptions{}),
           vision_enabled(options.vision_enabled), max_context(options.max_context) {
         if (options.max_context == 0) {
             throw std::invalid_argument("frontend max_context must be nonzero");

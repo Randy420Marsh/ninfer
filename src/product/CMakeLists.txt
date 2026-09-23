@@ -8,6 +8,14 @@ if(WIN32)
   target_link_libraries(ninfer_media_acquire PRIVATE ws2_32)
 endif()
 
+add_library(ninfer_media_pipeline STATIC
+  media_pipeline/pipeline.cpp
+)
+ninfer_internal_includes(ninfer_media_pipeline)
+target_link_libraries(ninfer_media_pipeline
+  PUBLIC ninfer_media_acquire
+  PRIVATE PkgConfig::FFMPEG PkgConfig::LIBCURL ninfer::json)
+
 add_library(ninfer_product_prompt_input STATIC
   prompt_input/prompt_input.cpp
 )

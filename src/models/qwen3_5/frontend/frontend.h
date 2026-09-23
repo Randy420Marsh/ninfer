@@ -25,6 +25,11 @@ struct FrontendOptions {
     std::size_t media_cache_bytes          = kDefaultMediaCacheBytes;
     std::size_t media_live_bytes           = kDefaultMediaLiveBytes;
     std::uint32_t media_preprocess_threads = 0;
+    // 0 keeps the artifact video_preprocessor_config budget / the processor's duration limit /
+    // the artifact's sampling rate.
+    std::uint64_t video_max_pixels = 0;
+    double video_max_seconds       = 0.0;
+    double video_fps               = 0.0;
 };
 
 struct FrontendResources;

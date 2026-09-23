@@ -75,7 +75,9 @@ cmake --build build-win -j
 ```
 
 On first configuration vcpkg compiles FFmpeg and curl from source (about 15 minutes);
-subsequent configurations restore them from the local binary cache in seconds.
+subsequent configurations restore them from the local binary cache in seconds. The
+[Windows build guide](BUILD_WINDOWS.md) covers the MSVC environment, prerequisites and
+troubleshooting.
 
 Tests and benchmarks are excluded from the default build. `cmake --preset release` configures
 the same product build; `cmake --preset dev` also enables tests and benchmarks and finds a
@@ -257,7 +259,8 @@ docker run --rm \
 The official artifacts provide the following capabilities, with optional components enabled at startup:
 
 - text generation with thinking and non-thinking prompt modes;
-- image, multi-image, video, and mixed multimodal messages;
+- image, multi-image, video, and mixed multimodal messages; video time ranges and audio transcripts
+  (this fork, see [Video and audio](#video-and-audio-this-fork));
 - chunked prefill, exact-batch CUDA Graph decode, and startup-bounded batched decode;
 - MTP speculative decoding with draft windows from one to five;
 - BF16, INT8, FP8, NVFP4, and K8V4 KV storage;
@@ -288,9 +291,35 @@ used by active requests and retained prefixes; `auto` resolves the largest legal
 startup from the memory remaining after weights while keeping 1 GiB of sizing headroom. Explicit
 capacities remain fixed for the process lifetime.
 
+## Video and audio (this fork)
+
+`ninfer-serve --vision` in this fork adds the following to Chat Completions:
+
+- **Time ranges:** `video_url` / `input_video` parts take `start` / `end` / `segments`. Only those parts
+  are decoded, and for HTTP(S) URLs only those byte ranges are downloaded. `file://` works under
+  `--media-path`.
+- **Budget:** each video part has a token budget (`--video-max-tokens`, default 24,576). The frame rate
+  drops to fit it and resolution stays at the chosen `detail` (`low` / `standard` / `high` / `max`,
+  calibrated for readable on-screen text). A 60 s 1080p video costs 25k tokens instead of 247k.
+- **Timing:** frame pairs with no change are dropped, and timestamps are in source time.
+- **Audio:** `input_audio` / `audio_url` parts and video soundtracks become timestamped transcripts via an
+  OpenAI-compatible speech-to-text server (`--asr-url`).
+- **URL safety:** remote URLs must resolve to public addresses unless `--media-allow-private-urls` is set.
+
+```json
+{"type": "video_url", "video_url": {"url": "file://talk.mp4",
+  "segments": [{"start": "01:00:00", "end": "01:05:00"}], "detail": "high", "audio": "transcript"}}
+```
+
+Verified on Qwen3.8-27B NVFP4: every modality under every reasoning effort, plus seeking into a 12 h
+video. Guide: [wiki/Video-and-Audio.md](wiki/Video-and-Audio.md) · internals:
+[wiki/Media-Pipeline-Internals.md](wiki/Media-Pipeline-Internals.md) · endpoint reference:
+[docs/serving.md](docs/serving.md#video-and-audio).
+
 ## Documentation
 
 - [Documentation index](docs/README.md)
+- [Video and audio guide](wiki/Video-and-Audio.md)
 - [CLI](docs/cli.md)
 - [HTTP serving](docs/serving.md)
 - [Performance](docs/performance.md)

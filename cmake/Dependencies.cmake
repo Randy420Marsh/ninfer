@@ -19,7 +19,7 @@ if(WIN32)
 else()
   find_package(PkgConfig REQUIRED)
   pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
-    libavformat libavcodec libavutil libswscale)
+    libavformat libavcodec libavutil libswscale libswresample)
 endif()
 
 # Repository-pinned header dependencies. No configure-time downloads.

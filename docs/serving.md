@@ -110,7 +110,15 @@ The endpoint supports:
 - string content and ordered text/refusal parts; adjacent parts are preserved without inserted
   separators, and empty wire content remains an empty turn;
 - User `image_url` parts, tool-result `image_url` parts used by compatible clients, and the User
-  `video_url` extension using HTTP(S) or data URIs; image detail is omitted or `auto`;
+  `video_url` extension using HTTP(S), `file://` (with `--media-path`) or data URIs; image detail is
+  omitted or `auto`;
+- the llama.cpp User `input_video` extension, `{"type": "input_video", "input_video": {"data":
+  ...}}` (or `url` in place of `data`), whose value is an HTTP(S) URL, a `file://` path, a data URI,
+  or bare base64 bytes;
+- per-part video options (segments, sampling rate, detail, token budget, audio handling), see
+  [Video and audio](#video-and-audio);
+- User `input_audio` (OpenAI, `{"data": <base64>, "format": "wav"}`) and `audio_url` parts, which
+  become timestamped transcripts when the server has `--asr-url`;
 - nonnegative `max_completion_tokens` and the legacy `max_tokens` spelling; zero performs prompt
   processing without generation;
 - `temperature`, `top_p`, presence/frequency penalties, and signed integer `seed`;
@@ -131,7 +139,7 @@ The endpoint supports:
 
 Options whose observable behavior the Engine cannot provide are rejected when they request that
 behavior. This includes JSON constrained output, nonzero `logit_bias`, requested log probabilities,
-audio/file input or audio output, required or named tool choice,
+file input, audio input without `--asr-url`, audio output, required or named tool choice,
 `parallel_tool_calls:false` with enabled tools, explicit low/high image detail, web search,
 moderation, low/high verbosity, stored Chat Completions, and non-empty legacy `functions`.
 Each capability rejection identifies the affected field and the guarantee NInfer cannot provide.
@@ -319,7 +327,59 @@ curl http://127.0.0.1:8080/v1/chat/completions \
   }'
 ```
 
-OpenAI image and video sources may be HTTP(S) URLs or base64 data URLs.
+OpenAI image and video sources may be HTTP(S) URLs or base64 data URLs; video (and audio) sources
+may also be `file://` paths under `--media-path`.
+
+### Video and audio
+
+A user guide covering how to ask, budgets, the speech-to-text setup and the tested model is in
+[wiki/Video-and-Audio.md](../wiki/Video-and-Audio.md).
+
+Every video part is cut, sampled and scaled by the server before the model sees it, so an hour
+of 1080p costs the same as a minute at the same sampling rate, and only the requested ranges of a
+long file or URL are read (HTTP range requests; a 10 s segment 10.5 h into a 199 MiB file
+fetches about 16 MiB).
+
+```json
+{"type": "video_url", "video_url": {
+  "url": "file://lectures/day1.mp4",
+  "segments": [{"start": "01:00:00", "end": "01:05:00"}, {"start": 36000, "duration": "90s"}],
+  "fps": 1, "detail": "high", "max_tokens": 16000, "max_frames": 300,
+  "audio": "transcript", "language": "fi"
+}}
+```
+
+| Field | Meaning | Default |
+|---|---|---|
+| `start`, `end`, `duration` | one range; times are seconds (number, or string with an optional `s`) or `[hh:]mm:ss[.f]` | whole media |
+| `segments` | several ranges, each `{start, end}` or `{start, duration}` | — |
+| `fps` | sampling rate; never above `--video-fps` | `--video-fps` |
+| `detail` | `low` (256), `standard` (576), `high` (1024), `max` (2048) tokens per two-frame group, or a number | `--video-detail` |
+| `max_tokens`, `max_frames` | per-part budget; may only lower the server limits | server limits |
+| `audio` | `auto`, `transcript`, `none` | `auto` |
+| `language` | transcript language hint (ISO code) | `--asr-language` or detected |
+
+Frames keep their aspect ratio and are scaled to the detail's pixel area (never upscaled);
+`standard` keeps 20 px text on a 1080p source readable, fine UI text needs `max`. When the
+requested ranges do not fit the budget, the sampling rate drops to fit, down to `--video-min-fps`;
+beyond that the request fails with `invalid_media` and a message giving the longest range that
+fits, so clients can split long videos into chunks and summarize them one by one. Two-frame groups
+in which no screen region changed (`--video-dedup`) are dropped. Each segment reaches the model as
+one or more clips (at most 16,384 tokens each, the model's single-item limit) whose frames carry
+their source times, so a segment 5 h into a file is described at 18000 s, not at 0 s.
+
+With `--asr-url` (an OpenAI-compatible `/v1/audio/transcriptions` server, e.g. faster-whisper),
+each segment's audio track is transcribed in memory and appended as
+`<start - end seconds> text` lines in source time; `input_audio` / `audio_url` parts become such a
+transcript. Without it, `audio: "transcript"` and audio parts are rejected.
+
+`file://` sources are refused unless `--media-path DIR` is set; relative paths resolve under DIR,
+and absolute paths must lie inside it. Remote URLs must resolve to public addresses (every redirect
+hop is checked) unless `--media-allow-private-urls` is set; either way only plain container
+formats are opened, so playlist, concat and image-sequence inputs cannot reach other files or
+hosts. HTTP media is opened by the demuxer after the redirect check, so a hostname whose DNS answer
+changes between the check and the open is not pinned; use `--media-allow-private-urls` only on
+trusted networks.
 
 Text and media requests use one complete-prompt context contract. After chat-template rendering and
 media-token expansion, the result must fit Engine `--max-context`. The current Vision runtime also
@@ -449,7 +509,7 @@ String `input` is normalized to one user `message` with an `input_text` part. Ar
 | `output_text` | assistant-message replay part containing string `text` |
 | `refusal` | assistant-message replay part; its text enters assistant history |
 | `input_image` | user- or assistant-message part with HTTP(S) or data-URI `image_url`; detail omitted or `auto`; requires server `--vision` |
-| `input_video` | NInfer extension with HTTP(S) or data-URI `video_url`; requires server `--vision` |
+| `input_video` | NInfer extension with HTTP(S) or data-URI `video_url`; requires server `--vision`; sampled with the server's video defaults (per-part ranges and options exist on Chat Completions only) |
 | `reasoning` | raw replay Item with `reasoning_text` content; summary/encrypted metadata may accompany raw text but cannot replace it |
 | `function_call` | completed assistant call with optional `id` and namespace, plus required `call_id`, `name`, and JSON-object string `arguments` |
 | `function_call_output` | completed result with required `call_id` and optional matching name/namespace assertion; `output` may be a string or a non-empty array of `input_text`/`input_image` parts |
@@ -791,6 +851,17 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--default-max-tokens N` | output limit when omitted by a request | `8192` |
 | `--default-thinking-budget N` | positive thinking cap inherited by thinking-enabled requests | unset |
 | `--vision` | enable media input and load Vision GPU allocations | off |
+| `--video-fps F` | default and maximum video sampling rate | `2` |
+| `--video-min-fps F` | lowest rate a long range may be thinned to before it is rejected | `0.05` |
+| `--video-detail low\|standard\|high\|max` | default frame detail (256/576/1024/2048 tokens per two-frame group) | `standard` |
+| `--video-max-tokens N` | Vision-token budget per video part (`64..32768`) | `24576` |
+| `--video-max-frames N` | frame budget per video part (`4..768`) | `768` |
+| `--video-dedup F` | luma change (0–255) some region must show for a frame group to be kept; `0` disables | `4` |
+| `--media-path DIR` | allow `file://` media under DIR | disabled |
+| `--media-allow-private-urls` | let media URLs reach loopback/private addresses | public only |
+| `--asr-url URL` | OpenAI-compatible transcription server for video audio and audio parts | unset |
+| `--asr-model NAME` | `model` sent to the transcription server | server default |
+| `--asr-language LANG` | default transcript language hint | auto-detect |
 | `--no-cuda-graph` | disable CUDA Graph decode | graphs on |
 | `--no-prefix-reuse` | disable compatible-prefix caching | prefix reuse on |
 | `--device-state-slots N` | extra Device checkpoint StateImages beyond the active-lane guarantee | `max-concurrency` |

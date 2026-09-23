@@ -55,6 +55,9 @@ struct Video {
     double duration  = 0.0;
     std::vector<int> indices;
     std::vector<Image> frames;
+    // Presentation time in seconds of each retained frame (container time, so a clip cut from a
+    // longer source keeps the source's times).
+    std::vector<double> frame_times;
 };
 
 struct VideoInfo {
@@ -65,6 +68,7 @@ struct VideoInfo {
     double fps         = 0.0;
     double duration    = 0.0;
     std::vector<int> indices;
+    std::vector<double> frame_times; // as Video::frame_times
 };
 
 // Exact display geometry without RGB conversion. Image probing decodes the first displayed frame
